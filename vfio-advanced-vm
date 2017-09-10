@@ -204,20 +204,27 @@ displayChoicesAsDialog(){
 	local options=()
 	local option=
 	local lines=$(echo "$3" | wc -l)
+        local maxLines=$(tput lines)
+	local maxLength=$(tput cols)
 	local length=0
-	local optionlength=0
+	local optionLength=0
 	while read option; do
 		options+=("$option")
 		options+=(" ")
 		options+=("off")
-		optionlength=$(echo "$option" | wc -m)
-		(( $optionlength > $length )) && length=$optionlength
+		optionLength=$(echo "$option" | wc -m)
+		(( $optionLength > $length )) && length=$optionLength
 	done <<< "$3"
+	lines=$((lines + 8))
+	length=$((length + 16))
+	(( $maxLines < $lines )) && lines=$maxLines 
+	(( $maxLength < $length )) && length=$maxLength
+
 
 	if [[ "$4" == "single" ]] ; then
-		choices=$(whiptail --clear --title "$1" --separate-output --radiolist "$2" $((lines+8)) $(($length+16)) $lines "${options[@]}" 3>&1 1>&2 2>&3)
+		choices=$(whiptail --clear --title "$1" --separate-output --radiolist "$2" $lines $length $((lines - 8)) "${options[@]}" 3>&1 1>&2 2>&3)
 	else
-		choices=$(whiptail --clear --title "$1" --separate-output --checklist "$2" $((lines+8)) $(($length+16)) $lines "${options[@]}" 3>&1 1>&2 2>&3)
+		choices=$(whiptail --clear --title "$1" --separate-output --checklist "$2" $lines $length $((lines - 8)) "${options[@]}" 3>&1 1>&2 2>&3)
 	fi
 	if [[ "$?" == "0" ]] ; then
 		if [[ "$choices" ]] ; then
@@ -235,14 +242,17 @@ displayChoicesAsDialog(){
 
 displayPathsSelectionAsDialog(){
 	local output=
-	local path="$(whiptail --clear --title "$1" --inputbox "$2" 10 100 3>&1 1>&2 2>&3)"
+	local length=100
+        local maxLength=$(tput cols)
+	(( $maxLength < $length )) && length=$maxLength
+	local path="$(whiptail --clear --title "$1" --inputbox "$2" 10 $length 3>&1 1>&2 2>&3)"
     while [[ "$path" ]] ; do
         if [[ "$(readlink -e "$path" 2> /dev/null)" ]] ; then
             output=$(echo -e "$output\n$path")
         else
             whiptail --clear --title "$1" --msgbox 5 50 "Path not found!"
         fi
-        path="$(whiptail --clear --title "$1" --inputbox "$3" 10 100 3>&1 1>&2 2>&3)"
+        path="$(whiptail --clear --title "$1" --inputbox "$3" 10 $length 3>&1 1>&2 2>&3)"
     done
 	echo "$output"
 }
