@@ -293,7 +293,7 @@ createPassthroughConfiguration(){
         echo "usbDevices=\"$usbDevices\"" >> $temporaryConfigFile
 
         # Configure services to shutdown
-        local availableServices=$(service --status-all)
+        local availableServices=$(service --status-all 2>&1)
         local service=
 		services="$(echo -e "lightdm\ngdm\nkdm")"
         while read service ; do
