@@ -1,0 +1,504 @@
+#!/bin/bash
+#title          : vfio-advanced-vm
+#description    : Configure and launch a virtuel machine with GPU passthrough option
+#author		    : Matthias Toscanelli (m.toscanelli@code-source.ch)
+#date           : 2017-09-10
+#version        : 1.0.0
+#==============================================================================
+
+# Force root execution
+[ `whoami` = root ] || { sudo "$0" "$@"; exit $?; }
+
+usage() {
+    if [[ -n "$1" ]] ; then
+        echo -e "\033[31mInvalid parameter '$1'\n"
+    fi
+    local lines="$(cat "$0" | grep -oE "\-(.*)\) #.*$" | tail -n+2)"
+    local line=
+    local options=
+    local option=
+    local description=
+    echo -e "\n\033[32m$(basename $0) usage:"
+    while read line; do
+        option="$(echo "${line//\) #/ #}" | sed "s/ #.*$//g")"
+        description="$(echo "${line//\) #/ #}" | sed "s/^.* #//g")"
+        options="$(echo -e "$options\n\n   $option§$description")"
+    done <<< "$lines"
+    column -e -s "§" -t <<< "$options"
+    echo ""
+    clearAndExit 0
+}
+
+bindDriver() {
+	echo "Bind device $1 to $2"
+    local dev="$1"
+    local vendor=$(cat /sys/bus/pci/devices/$dev/vendor)
+    local device=$(cat /sys/bus/pci/devices/$dev/device)
+
+    if [ -e /sys/bus/pci/devices/$dev/driver ]; then
+        echo $dev > /sys/bus/pci/devices/$dev/driver/unbind
+    fi
+    sleep 0.5
+    echo $vendor $device > /sys/bus/pci/drivers/$2/new_id
+}
+
+loadPassthrough() {
+	echo "Stop services"
+	while read service ; do
+		if [[ -n "$service" ]] ; then
+			service $service stop
+		fi
+	done <<< "$3"
+
+	bindDriver "0000:$1" "vfio-pci"
+	bindDriver "0000:$2" "vfio-pci"
+}
+
+unloadPassthrough() {
+	echo "Make sure that vm is down"	
+	kill -9 "$(pgrep qemu-system-x86)" 2> /dev/null
+
+	echo "Rebind device to default"
+    bindDriver "0000:$1" "nvidia"
+    bindDriver "0000:$2" "nvidia"
+
+
+	echo "Start services"
+	while read service ; do
+        if [[ -n "$service" ]] ; then
+            service $service start
+        fi
+    done <<< "$3"
+}
+
+createOptionsForIsoDrives() {
+	local i=0
+	local output=
+	while read cdrom ; do
+		if [[ -n "$cdrom" ]] ; then
+			output="$output -drive file=$cdrom,media=cdrom"	
+		fi
+		i=$((i+1))
+	done <<< "$1"
+	echo "$output"
+}
+
+createOptionsForUsbDevices() {
+	local i=0
+	local output=
+	while read usb ; do
+		if [[ -n "$usb" ]] && [[ -n "$(lsusb | grep "$usb")" ]] ; then
+            output="$output -usbdevice host:$usb"
+            i=$((i+1))
+        fi
+	done <<< "$1"
+	echo "$output"
+}
+
+createOptionsForRawImages() {
+    local i=0
+    local output=
+    while read img ; do
+        if [[ -n "$img" ]] ; then
+            output="$output -drive file=$img,format=raw,if=virtio"
+            i=$((i+1))
+        fi
+    done <<< "$1"
+    echo "$output"
+}
+
+createOptionsForDrives() {
+	local i=0
+	local output=
+	while read drive ; do
+		if [[ -n "$drive" ]] ; then
+			output="$output -drive file=$drive,id=drive$i,format=raw,if=none -device scsi-hd,drive=drive$i"
+		    i=$((i+1))
+		fi
+	done <<< "$1"
+	echo "$output"
+}
+
+translatedrives() {
+	local output=
+	while read drive ; do
+		if [[ -n "$drive" ]] ; then
+			drive=$(readlink -e /dev/disk/by-id/"$drive")
+			if [[ -n "$drive" ]] ; then
+				output=$(echo -e "$output\n$drive")
+			fi
+		fi
+	done <<< "$1"
+	echo "$output"
+}
+
+getDriveMountedPartitions() {
+	local output=
+    while read drive ; do
+        if [[ -n "$drive" ]] ; then
+            output=$(echo -e "$output\n$(mount | grep -oE "$drive[0-9]*")")
+        fi
+    done <<< "$1"
+    echo "$output"
+}
+
+umountDrivePartitions() {
+	echo "Unmounting drives"
+    while read drive ; do
+        if [[ -n "$drive" ]] ; then
+            umount "$drive"
+            if [[ "$?" != "0" ]] ; then
+                echo -e "\033[31mUnable to umount the drive $drive"
+                mountDrivePartitions "$1"
+                clearAndExit 1
+            fi
+        fi
+    done <<< "$1"
+}
+
+mountDrivePartitions() {
+	echo "Remounting drives"
+    while read drive ; do
+        if [[ -n "$drive" ]] ; then
+            mount "$drive"
+            # Try to fix NTFS partition if they are not well umounted by Windows
+            if [[ "$?" != "0" ]] && [[ -n $(file -sL "$drive" | grep -i NTFS)  ]]; then
+                ntfsfix "$drive"
+                mount "$drive"
+            fi
+        fi
+    done <<< "$1"
+}
+
+filterRunningServices() {
+	local runningServices="$(service --status-all 2>/dev/null | grep -E "\[ \+ \]")"
+	local output=
+    while read service ; do
+        if [[ -n "$service" ]] && [[ -n "$(echo "$runningServices" | grep -E "$service$")" ]]; then
+            output=$(echo -e "$output\n$service")
+        fi
+    done <<< "$1"
+    echo "$output"
+}
+
+clearAndExit() {
+#	if [[ "$temporaryConfigFile" ]] && [[ -f "$temporaryConfigFile" ]]; then
+#		rm -f "$temporaryConfigFile"
+#	fi
+	if [[ "$temporaryOvmfBiosFile" ]] && [[ -f "$temporaryOvmfBiosFile" ]]; then
+		rm -f "$temporaryOvmfBiosFile"
+	fi
+	exit $1
+}
+
+displayChoicesAsDialog(){
+	local options=()
+	local option=
+	local lines=$(echo "$3" | wc -l)
+	local length=0
+	local optionlength=0
+	while read option; do
+		options+=("$option")
+		options+=(" ")
+		options+=("off")
+		optionlength=$(echo "$option" | wc -m)
+		(( $optionlength > $length )) && length=$optionlength
+	done <<< "$3"
+
+	if [[ "$4" == "single" ]] ; then
+		choices=$(whiptail --clear --title "$1" --separate-output --radiolist "$2" $((lines+8)) $(($length+16)) $lines "${options[@]}" 3>&1 1>&2 2>&3)
+	else
+		choices=$(whiptail --clear --title "$1" --separate-output --checklist "$2" $((lines+8)) $(($length+16)) $lines "${options[@]}" 3>&1 1>&2 2>&3)
+	fi
+	if [[ "$?" == "0" ]] ; then
+		if [[ "$choices" ]] ; then
+			echo "$choices"
+		else
+			if [[ "$5" == "1" ]] ; then
+				echo "You must select an option!"
+				echo "$(displayChoicesAsDialog "$1" "$2" "$3" "$4" "$5")"
+			fi
+		fi
+	else
+		echo ""
+	fi
+}
+
+displayPathsSelectionAsDialog(){
+	local output=
+	local path="$(whiptail --clear --title "$1" --inputbox "$2" 10 100 3>&1 1>&2 2>&3)"
+    while [[ "$path" ]] ; do
+        if [[ "$(readlink -e "$path" 2> /dev/null)" ]] ; then
+            output=$(echo -e "$output\n$path")
+        else
+            whiptail --clear --title "$1" --msgbox 5 50 "Path not found!"
+        fi
+        path="$(whiptail --clear --title "$1" --inputbox "$3" 10 100 3>&1 1>&2 2>&3)"
+    done
+	echo "$output"
+}
+
+createPassthroughConfiguration(){
+	if [[ "$usePassthrough" ]] ; then
+        # Configure graphic passthrough
+        local cards="$(lspci | grep VGA)"
+        local ncards=$(echo "$cards" | wc -l)
+        local card=
+        if [[ $ncards -eq 0 ]] ; then
+            echo -e "\033[31mNo graphic card found, please see have a look below"
+            lspci
+            clearAndExit 1
+        fi
+        card="$(displayChoicesAsDialog "Graphic card passthrough" "Select the card you want the vm to passthrough:" "$cards" single 1)"
+        if [[ ! "$card" ]] ; then
+            echo -e "\033[31mNo graphic card selected"
+            clearAndExit 1
+        fi
+        card="$(echo "$card" | cut -f1 -d" " | sed 's/\.0$//g')"
+        vga="$card.0"
+        audio="$card.1"
+        echo "vga=\"$vga\"" >> $temporaryConfigFile
+        echo "audio=\"$audio\"" >> $temporaryConfigFile
+
+        # Configure USB passthrough
+        local availableUsbDevices="$(lsusb | grep -oE "[0-9a-f]{4}:[0-9a-f]{4}.*$")"
+        local device=
+        usbDevices=
+        if [[ $(echo "$availableUsbDevices" | wc -l) -gt 0 ]] ; then
+            while read device ; do
+                usbDevices="$(echo -e "$usbDevices\n$(echo "$device" | grep -oE "^[0-9a-f]{4}:[0-9a-f]{4}")")"
+            done <<< "$(displayChoicesAsDialog "USB passthrough" "Choose usb devices you want to use:" "$availableUsbDevices" multiple 0)"
+        fi
+        echo "usbDevices=\"$usbDevices\"" >> $temporaryConfigFile
+
+        # Configure services to shutdown
+        local availableServices=$(service --status-all)
+        local service=
+		services="$(echo -e "lightdm\ngdm\nkdm")"
+        while read service ; do
+            services="$(echo -e "$services\n$(echo "${service// /}" | cut -f2 -d])")"
+        done <<< "$(displayChoicesAsDialog "Services to shutdown" "Choose whitch services should be shutdown while running the virtual machine:" "$availableServices" multiple 0)"
+		echo "services=\"$services\"" >> $temporaryConfigFile
+	fi
+}
+
+createConfiguration(){
+    # Create temporary file to store config
+    temporaryConfigFile=$(mktemp)
+
+    # Configure drives
+	local availableDrives=$(while read line; do echo "$line $(readlink -e /dev/disk/by-id/$line)"; done <<< $(grep -vE "(^wwn-|part[0-9]+$)" <<< $(ls -1 /dev/disk/by-id/)));
+	drivesById="$(displayChoicesAsDialog "Adding drives" "Choose drives you want to use:" "$availableDrives" multiple 0 | sed 's/ \/dev\/.*$//g')"
+    echo "drivesById=\"$drivesById\"" >> $temporaryConfigFile
+
+	# Configure images
+	images="$(displayPathsSelectionAsDialog "Adding raw images" "Enter the path to an image you want to add:" "Enter the path to an other image you want to add:")"
+	echo "images=\"$images\"" >> $temporaryConfigFile
+
+	# Configure isoDrives
+	isoDrives="$(displayPathsSelectionAsDialog "Adding ISO" "Enter an iso you want to add:" "Enter an other iso you want to add:")"
+	echo "isoDrives=\"$isoDrives\"" >> $temporaryConfigFile
+
+	# Passthrough configuration
+    createPassthroughConfiguration
+}
+
+storeConfiguration(){
+    if [[ ! "$doNotStoreConfiguration" ]] ; then
+        if [[ -f "$temporaryConfigFile" ]] ; then
+            if [[ -f "$configFile" ]] ; then
+                mv "$configFile" "$configFile.bak"
+            fi
+            mv "$temporaryConfigFile" "$configFile"
+        else
+            echo -e "\033[31mUnable to store configuration, temporary configuration file not found!"
+            clearAndExit 1
+        fi
+    fi
+}
+
+checkConfiguration(){
+    local drives=$(translatedrives "$drivesById")
+    if [[ ! "$drives" ]] && [[ ! "$images" ]] ; then
+        echo -e "\033[31mYou must at least select a drive or an image that contains your OS!"
+        clearAndExit 1
+    fi
+    if [[ "$usePassthrough" ]] ; then
+        if [[ ! "$vga" ]] || [[ ! -f "/sys/bus/pci/devices/0000:$vga/vendor" ]]; then
+            echo -e "\033[31mGPU(vga) Passthrough is not selected or do not exist!"
+            clearAndExit 1
+        fi
+        if [[ ! "$audio" ]] || [[ ! -f "/sys/bus/pci/devices/0000:$audio/vendor" ]]; then
+            echo -e "\033[31mGPU(audio) Passthrough is not selected or do not exist!"
+            clearAndExit 1
+        fi
+        # TODO: Detect if at least a keyboard is select in USB device
+    fi
+}
+
+
+usePassthrough=
+configFile="/etc/vfio-advanced-vm.conf"
+ovmfBiosFile="/usr/share/ovmf/OVMF.fd"
+temporaryOvmfBiosFile=
+doNotStoreConfiguration=
+temporaryConfigFile=
+runningMode="default"
+while [[ $# -gt 0 ]]; do
+    key="$1"
+    case $key in
+        -c|--configure) #Do not run virtual machine, simply configure the vm
+            runningMode="configuration"
+            ;;
+        --config) #Use this file as configuration file (default: /etc/vfio-advanced-vm.conf)
+            if [[ -d "$2" ]] ; then
+                echo -e "\033[31mUnable to set config file: '$2' is a directory"
+                clearAndExit 1
+            fi
+            if [[ ! -d "$(dirname "$2")" ]] ; then
+                echo -e "\033[31mUnable to set config file: '$(dirname "$2")' parent directory do not exist"
+                clearAndExit 1
+            fi
+            configFile="$2"
+            shift
+            ;;
+        --no-config) #Do not store configuration
+            doNotStoreConfiguration=1
+            ;;
+        --ovmf) #Path to OVMF bios (default: /usr/share/ovmf/OVMF.fd)
+            if [[ ! -f "$2" ]] ; then
+                echo -e "\033[31mUnable to set OVMF bios: '$2' file not found"
+                clearAndExit 1
+            fi
+            ovmfBiosFile="$2"
+            shift
+            ;;
+        -p|--passthrough) #Run virtual machine and use GPU passthrough
+            usePassthrough=1
+            ;;
+        -h|--help) #Print help
+            usage
+            ;;
+        *)
+            usage $key
+            ;;
+    esac
+    shift
+done
+
+# Create configuration if needed
+if [[ "$runningMode" == "configuration" ]] ; then
+    createConfiguration
+    checkConfiguration
+    storeConfiguration
+    clearAndExit 0
+else
+    if [[ -f "$configFile" ]] ; then
+        echo "Do you want to load the configuration? (y|n)"
+        read -s -n1 loadConfiguration
+        if [[ "$loadConfiguration" == "y" ]] ; then
+            source "$configFile"
+            if [[ "$usePassthrough" ]] && [[ ! "$vga" ]] ; then
+                temporaryConfigFile=$(mktemp)
+                cp "$configFile" "$temporaryConfigFile"
+                createPassthroughConfiguration
+            fi
+        else
+            createConfiguration
+        fi
+    else
+        createConfiguration
+    fi
+fi
+
+
+# Base options
+OPTS="-M q35 -enable-kvm -rtc base=utc -k fr-ch"
+
+# Network
+OPTS="$OPTS -net nic,model=virtio -net user"
+
+# Load OVMF OVMF
+temporaryOvmfBiosFile=$(mktemp)
+cp "$ovmfBiosFile" "$temporaryOvmfBiosFile"
+OPTS="$OPTS -drive if=pflash,format=raw,readonly,file=$ovmfBiosFile"
+OPTS="$OPTS -drive if=pflash,format=raw,file=$temporaryOvmfBiosFile"
+OPTS="$OPTS -global isa-debugcon.iobase=0x402 -debugcon file:/tmp/ovmf.$(date "+%Y%m%d%H%M").log"
+
+# Define SCSI device
+OPTS="$OPTS -device virtio-scsi-pci,id=scsi"
+
+# Drive Image (available drive / image)
+OPTS="$OPTS $(createOptionsForRawImages "$images")"
+
+# ISO images
+OPTS="$OPTS $(createOptionsForIsoDrives "$iso")"
+
+# Drives (mounted drives will be umounted during the virtual machine run)
+drives=$(translatedrives "$drivesById")
+drivesPartitions=$(getDriveMountedPartitions "$drives")
+OPTS="$OPTS $(createOptionsForDrives "$drives")"
+
+if [[ "$usePassthrough" ]] ; then
+	ram=`echo $(($(getconf _PHYS_PAGES) * $(getconf PAGE_SIZE) / (1024 * 1024) - 4096))`
+#	ram=8192
+	cpu=6
+	requireload=1
+
+	# Filter services and return only running one
+	services="$(filterRunningServices "$services")"
+
+	# Video & Sound
+	OPTS="$OPTS -vga none -nographic"
+	OPTS="$OPTS -device ioh3420,bus=pcie.0,addr=1c.0,multifunction=on,port=1,chassis=1,id=root.1"
+	OPTS="$OPTS -device vfio-pci,host=$vga,bus=root.1,addr=00.0,multifunction=on,x-vga=on"
+	OPTS="$OPTS -device vfio-pci,host=$audio,bus=root.1,addr=00.1"
+
+	# USB
+	OPTS="$OPTS -usb -device usb-ehci,id=ehci $(createOptionsForUsbDevices "$usbDevices")"
+else
+	ram=8192
+    cpu=4
+    requireload=
+
+
+	# Video & Sound
+	OPTS="$OPTS -vga qxl"
+	OPTS="$OPTS -soundhw all"
+
+	# USB
+	OPTS="$OPTS -usbdevice tablet"
+	
+	# QEMU monitor interface
+	OPTS="$OPTS -monitor stdio"
+fi
+
+# CPU
+OPTS="$OPTS -cpu host,kvm=off -smp $cpu,sockets=1,cores=$cpu,threads=1"
+
+# RAM
+OPTS="$OPTS -m $ram -balloon none"
+
+echo "Checking configuration"
+checkConfiguration
+if [[ "$temporaryConfigFile" ]] ; then
+    echo "Storing the configuration"
+    storeConfiguration
+fi
+
+umountDrivePartitions "$drivesPartitions"
+if [[ "$usePassthrough" ]] ; then
+	loadPassthrough "$vga" "$audio" "$services"
+fi
+
+echo "Starting VM"
+export QEMU_PA_SAMPLES=128
+export QEMU_AUDIO_DRV=pa
+taskset -c "0-$((cpu - 1))" qemu-system-x86_64 $OPTS
+
+if [[ "$usePassthrough" ]] ; then
+	unloadPassthrough "$vga" "$audio" "$services"
+fi
+mountDrivePartitions "$drivesPartitions"
+
+clearAndExit 0
