@@ -298,7 +298,7 @@ createConfiguration(){
     temporaryConfigFile=$(mktemp)
 
     # Configure drives
-	local availableDrives=$(while read line; do echo "$line $(readlink -e /dev/disk/by-id/$line)"; done <<< $(grep -vE "(^wwn-|part[0-9]+$)" <<< $(ls -1 /dev/disk/by-id/)));
+	local availableDrives=$(while read line; do echo "$line $(readlink -e /dev/disk/by-id/$line)"; done <<< "$(grep -vE "(^wwn-|part[0-9]+$)" <<< "$(ls -1 /dev/disk/by-id/)")");
 	drivesById="$(displayChoicesAsDialog "Adding drives" "Choose drives you want to use:" "$availableDrives" multiple 0 | sed 's/ \/dev\/.*$//g')"
     echo "drivesById=\"$drivesById\"" >> $temporaryConfigFile
 
