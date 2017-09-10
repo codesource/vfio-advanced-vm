@@ -38,13 +38,18 @@ bindDriver() {
     local dev="$1"
     local vendor=$(cat /sys/bus/pci/devices/$dev/vendor)
     local device=$(cat /sys/bus/pci/devices/$dev/device)
+    local limit=30
 
     if [ -e /sys/bus/pci/devices/$dev/driver ]; then
-        echo "$(basename "$(readlink -e /sys/bus/pci/devices/$dev/driver)")"
         echo $dev > /sys/bus/pci/devices/$dev/driver/unbind
+        while [ -e /sys/bus/pci/devices/$dev/driver ] && [[ $limit -gt 0 ]]; do
+            sleep 0.5
+            limit=$((limit - 1))
+            echo -n "."
+        done
     fi
     sleep 0.5
-    echo $vendor $device > /sys/bus/pci/drivers/$2/new_id
+    echo "$vendor $device" > /sys/bus/pci/drivers/$2/new_id
 }
 
 loadPassthrough() {
@@ -55,8 +60,8 @@ loadPassthrough() {
 		fi
 	done <<< "$services"
 
-	vgaDriver=$(bindDriver "0000:$vga" "vfio-pci")
-	audioDriver=$(bindDriver "0000:$audio" "vfio-pci")
+	bindDriver "0000:$vga" "vfio-pci"
+	bindDriver "0000:$audio" "vfio-pci"
 }
 
 unloadPassthrough() {
@@ -191,9 +196,9 @@ filterRunningServices() {
 }
 
 clearAndExit() {
-#	if [[ "$temporaryConfigFile" ]] && [[ -f "$temporaryConfigFile" ]]; then
-#		rm -f "$temporaryConfigFile"
-#	fi
+	if [[ "$temporaryConfigFile" ]] && [[ -f "$temporaryConfigFile" ]]; then
+		rm -f "$temporaryConfigFile"
+	fi
 	if [[ "$temporaryOvmfBiosFile" ]] && [[ -f "$temporaryOvmfBiosFile" ]]; then
 		rm -f "$temporaryOvmfBiosFile"
 	fi
@@ -466,6 +471,9 @@ if [[ "$usePassthrough" ]] ; then
 	cpu=6
 	requireload=1
 
+	vgaDriver=$(basename "$(readlink -e "/sys/bus/pci/devices/0000:$vga/driver")")
+	audioDriver=$(basename "$(readlink -e "/sys/bus/pci/devices/0000:$audio/driver")")
+
 	# Filter services and return only running one
 	services="$(filterRunningServices "$services")"
 
@@ -474,7 +482,6 @@ if [[ "$usePassthrough" ]] ; then
 	OPTS="$OPTS -device ioh3420,bus=pcie.0,addr=1c.0,multifunction=on,port=1,chassis=1,id=root.1"
 	OPTS="$OPTS -device vfio-pci,host=$vga,bus=root.1,addr=00.0,multifunction=on,x-vga=on"
 	OPTS="$OPTS -device vfio-pci,host=$audio,bus=root.1,addr=00.1"
-
 	# USB
 	OPTS="$OPTS -usb -device usb-ehci,id=ehci $(createOptionsForUsbDevices "$usbDevices")"
 else
