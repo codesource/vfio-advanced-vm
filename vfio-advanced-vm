@@ -9,6 +9,10 @@
 # Force root execution
 [ `whoami` = root ] || { sudo "$0" "$@"; exit $?; }
 
+#TODO: Check if executables are available
+#TODO: Check if IMMO is enable
+#TODO: Check if modules are loaded (perhaps load them manualy)
+
 usage() {
     if [[ -n "$1" ]] ; then
         echo -e "\033[31mInvalid parameter '$1'\n"
@@ -36,6 +40,7 @@ bindDriver() {
     local device=$(cat /sys/bus/pci/devices/$dev/device)
 
     if [ -e /sys/bus/pci/devices/$dev/driver ]; then
+        echo "$(basename "$(readlink -e /sys/bus/pci/devices/$dev/driver)")"
         echo $dev > /sys/bus/pci/devices/$dev/driver/unbind
     fi
     sleep 0.5
@@ -48,10 +53,10 @@ loadPassthrough() {
 		if [[ -n "$service" ]] ; then
 			service $service stop
 		fi
-	done <<< "$3"
+	done <<< "$services"
 
-	bindDriver "0000:$1" "vfio-pci"
-	bindDriver "0000:$2" "vfio-pci"
+	vgaDriver=$(bindDriver "0000:$vga" "vfio-pci")
+	audioDriver=$(bindDriver "0000:$audio" "vfio-pci")
 }
 
 unloadPassthrough() {
@@ -59,8 +64,12 @@ unloadPassthrough() {
 	kill -9 "$(pgrep qemu-system-x86)" 2> /dev/null
 
 	echo "Rebind device to default"
-    bindDriver "0000:$1" "nvidia"
-    bindDriver "0000:$2" "nvidia"
+	if [[ "$vgaDriver" ]] ; then
+        bindDriver "0000:$vga" "$vgaDriver"
+    fi
+    if [[ "$audioDriver" ]] ; then
+        bindDriver "0000:$audio" "$audioDriver"
+    fi
 
 
 	echo "Start services"
@@ -68,7 +77,7 @@ unloadPassthrough() {
         if [[ -n "$service" ]] ; then
             service $service start
         fi
-    done <<< "$3"
+    done <<< "$services"
 }
 
 createOptionsForIsoDrives() {
@@ -256,7 +265,9 @@ createPassthroughConfiguration(){
         fi
         card="$(echo "$card" | cut -f1 -d" " | sed 's/\.0$//g')"
         vga="$card.0"
+        vgaDriver=
         audio="$card.1"
+        audioDriver=
         echo "vga=\"$vga\"" >> $temporaryConfigFile
         echo "audio=\"$audio\"" >> $temporaryConfigFile
 
