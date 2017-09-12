@@ -369,6 +369,7 @@ ovmfBiosFile="/usr/share/ovmf/OVMF.fd"
 temporaryOvmfBiosFile=
 doNotStoreConfiguration=
 temporaryConfigFile=
+propagateShutdown=
 runningMode="default"
 while [[ $# -gt 0 ]]; do
     key="$1"
@@ -401,6 +402,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         -p|--passthrough) #Run virtual machine and use GPU passthrough
             usePassthrough=1
+            ;;
+        -s|--shutdown) #Shutdown the computer when virtual machine stop
+            propagateShutdown=1
             ;;
         -h|--help) #Print help
             usage
@@ -524,9 +528,18 @@ export QEMU_PA_SAMPLES=128
 export QEMU_AUDIO_DRV=pa
 taskset -c "0-$((cpu - 1))" qemu-system-x86_64 $OPTS
 
-if [[ "$usePassthrough" ]] ; then
-	unloadPassthrough "$vga" "$audio" "$services"
+if [[ "$propagateShutdown" ]] ; then
+    shutdown -h now
+else
+    propagateAfterAsking=$(whiptail --clear --title "Shutdown propagation" --yesno "Do you want to shutdown?" 5 50)
+    if [[ "$propagateAfterAsking" == "1" ]] ; then
+        shutdown -h now
+    else
+        if [[ "$usePassthrough" ]] ; then
+            unloadPassthrough "$vga" "$audio" "$services"
+        fi
+        mountDrivePartitions "$drivesPartitions"
+    fi
 fi
-mountDrivePartitions "$drivesPartitions"
 
 clearAndExit 0
