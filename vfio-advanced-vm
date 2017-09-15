@@ -403,7 +403,7 @@ while [[ $# -gt 0 ]]; do
         -p|--passthrough) #Run virtual machine and use GPU passthrough
             usePassthrough=1
             ;;
-        -s|--shutdown) #Shutdown the computer when virtual machine stop
+        -s|--shutdown) #Shutdown the computer when virtual machine stop (only in combinaison of -p)
             propagateShutdown=1
             ;;
         -h|--help) #Print help
@@ -528,18 +528,22 @@ export QEMU_PA_SAMPLES=128
 export QEMU_AUDIO_DRV=pa
 taskset -c "0-$((cpu - 1))" qemu-system-x86_64 $OPTS
 
-if [[ "$propagateShutdown" ]] ; then
-    shutdown -h now
+sleep 5
+echo "Shutdown section"
+if [[ "$usePassthrough" ]] ; then
+	if [[ "$propagateShutdown" ]] ; then
+	    shutdown -h now
+	else
+	    propagateAfterAsking=$(whiptail --clear --title "Shutdown propagation" --yesno "Do you want to shutdown?" 7 50 3>&1 1>&2 2>&3)
+	    if [[ "$propagateAfterAsking" == "1" ]] ; then
+	        shutdown -h now
+	    else
+	        unloadPassthrough "$vga" "$audio" "$services"
+        	mountDrivePartitions "$drivesPartitions"
+	   fi
+	fi
 else
-    propagateAfterAsking=$(whiptail --clear --title "Shutdown propagation" --yesno "Do you want to shutdown?" 5 50)
-    if [[ "$propagateAfterAsking" == "1" ]] ; then
-        shutdown -h now
-    else
-        if [[ "$usePassthrough" ]] ; then
-            unloadPassthrough "$vga" "$audio" "$services"
-        fi
-        mountDrivePartitions "$drivesPartitions"
-    fi
+	mountDrivePartitions "$drivesPartitions"
 fi
 
 clearAndExit 0
