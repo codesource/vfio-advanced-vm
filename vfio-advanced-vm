@@ -534,8 +534,8 @@ if [[ "$usePassthrough" ]] ; then
 	if [[ "$propagateShutdown" ]] ; then
 	    shutdown -h now
 	else
-	    propagateAfterAsking=$(whiptail --clear --title "Shutdown propagation" --yesno "Do you want to shutdown?" 7 50 3>&1 1>&2 2>&3)
-	    if [[ "$propagateAfterAsking" == "1" ]] ; then
+	    whiptail --clear --title "Shutdown propagation" --defaultno --yesno "Do you want to shutdown?" 7 50 3>&1 1>&2 2>&3
+	    if [[ "$?" == "0" ]] ; then
 	        shutdown -h now
 	    else
 	        unloadPassthrough "$vga" "$audio" "$services"
